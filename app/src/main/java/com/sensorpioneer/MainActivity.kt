@@ -1,26 +1,24 @@
 package com.sensorpioneer
 
+import android.app.Activity
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
-import androidx.appcompat.app.AppCompatActivity
-import androidx.lifecycle.ViewModel
-import androidx.lifecycle.ViewModelProvider
 import com.sensorpioneer.logic.EnvironmentData
 import com.sensorpioneer.logic.Equipment
+import com.sensorpioneer.logic.SurvivalController
 import com.sensorpioneer.logic.SurvivalEvent
-import com.sensorpioneer.logic.SurvivalViewModel
 import com.sensorpioneer.logic.VirtualSensor
 import kotlin.random.Random
 
 /**
  * Sensor Pioneer の最小実行可能サンプル Activity。
- * XML レイアウト不要で、Android Studio に配置後すぐ動作確認できる。
+ * AndroidX ViewModel や kotlinx.coroutines を使わずに動作する実装。
  */
-class MainActivity : AppCompatActivity() {
+class MainActivity : Activity() {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private var running = false
@@ -28,17 +26,14 @@ class MainActivity : AppCompatActivity() {
     private lateinit var statusView: TextView
     private lateinit var toggleButton: Button
 
-    private val viewModel: SurvivalViewModel by lazy {
-        ViewModelProvider(this, SurvivalViewModelFactory()).get(SurvivalViewModel::class.java)
-    }
+    private lateinit var controller: SurvivalController
 
     private val pollRunnable = object : Runnable {
         override fun run() {
             if (!running) return
 
             val sampledEnvironment = randomEnvironment()
-            viewModel.pollAndUpdate(sampledEnvironment)
-            renderState()
+            controller.pollAndUpdate(sampledEnvironment)
 
             // 1秒間隔でセンサー更新をシミュレート
             mainHandler.postDelayed(this, 1000L)
@@ -47,6 +42,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        controller = createController()
 
         statusView = TextView(this).apply {
             textSize = 16f
@@ -70,10 +67,7 @@ class MainActivity : AppCompatActivity() {
 
         val resetButton = Button(this).apply {
             text = "RESET DURABILITY"
-            setOnClickListener {
-                viewModel.resetDurability()
-                renderState()
-            }
+            setOnClickListener { controller.resetDurability() }
         }
 
         val root = LinearLayout(this).apply {
@@ -85,7 +79,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         setContentView(root)
-        renderState()
+        renderState(controller.getState())
     }
 
     override fun onStop() {
@@ -95,8 +89,7 @@ class MainActivity : AppCompatActivity() {
         mainHandler.removeCallbacks(pollRunnable)
     }
 
-    private fun renderState() {
-        val state = viewModel.uiState.value
+    private fun renderState(state: com.sensorpioneer.logic.SurvivalUiState) {
         val reading = state.sensorReading?.measured
 
         val envText = if (reading == null) {
@@ -135,18 +128,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun randomEnvironment(): EnvironmentData {
-        return EnvironmentData(
-            temperatureCelsius = Random.nextDouble(-80.0, 120.0),
-            pressureHpa = Random.nextDouble(200.0, 2200.0),
-            humidityPercent = Random.nextDouble(0.0, 100.0)
-        )
-    }
-}
-
-private class SurvivalViewModelFactory : ViewModelProvider.Factory {
-    @Suppress("UNCHECKED_CAST")
-    override fun <T : ViewModel> create(modelClass: Class<T>): T {
+    private fun createController(): SurvivalController {
         val equipment = Equipment(
             name = "Explorer Suit Mk-I",
             minTemperatureCelsius = -20.0,
@@ -162,6 +144,22 @@ private class SurvivalViewModelFactory : ViewModelProvider.Factory {
         )
 
         val sensor = VirtualSensor(precision = 0.82)
-        return SurvivalViewModel(equipment, sensor) as T
+
+        return SurvivalController(
+            equipment = equipment,
+            sensor = sensor,
+            onStateChanged = { renderState(it) },
+            onCriticalFailure = {
+                // 必要ならここでダイアログ表示・SE再生などを行う
+            }
+        )
+    }
+
+    private fun randomEnvironment(): EnvironmentData {
+        return EnvironmentData(
+            temperatureCelsius = Random.nextDouble(-80.0, 120.0),
+            pressureHpa = Random.nextDouble(200.0, 2200.0),
+            humidityPercent = Random.nextDouble(0.0, 100.0)
+        )
     }
 }

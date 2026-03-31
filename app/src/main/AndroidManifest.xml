@@ -6,7 +6,7 @@
         android:allowBackup="true"
         android:label="Sensor Pioneer"
         android:supportsRtl="true"
-        android:theme="@style/Theme.AppCompat.Light.NoActionBar">
+        android:theme="@android:style/Theme.Material.Light">
         <activity
             android:name=".MainActivity"
             android:exported="true">

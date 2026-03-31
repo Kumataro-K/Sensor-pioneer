@@ -1,12 +1,5 @@
 package com.sensorpioneer.logic
 
-import androidx.lifecycle.ViewModel
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharedFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asSharedFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlin.math.pow
 import kotlin.random.Random
 
@@ -115,31 +108,31 @@ data class Evaluation(
 class SurvivalManager(private val equipment: Equipment) {
 
     fun evaluate(reading: SensorReading, currentDurability: Double): Evaluation {
-        val breaches = buildList {
-            evaluateMetric(
-                metric = Metric.TEMPERATURE,
-                value = reading.measured.temperatureCelsius,
-                min = equipment.minTemperatureCelsius,
-                max = equipment.maxTemperatureCelsius,
-                k = equipment.temperatureK
-            )?.let(::add)
+        val breaches = mutableListOf<ThresholdBreach>()
 
-            evaluateMetric(
-                metric = Metric.PRESSURE,
-                value = reading.measured.pressureHpa,
-                min = equipment.minPressureHpa,
-                max = equipment.maxPressureHpa,
-                k = equipment.pressureK
-            )?.let(::add)
+        evaluateMetric(
+            metric = Metric.TEMPERATURE,
+            value = reading.measured.temperatureCelsius,
+            min = equipment.minTemperatureCelsius,
+            max = equipment.maxTemperatureCelsius,
+            k = equipment.temperatureK
+        )?.let { breaches.add(it) }
 
-            evaluateMetric(
-                metric = Metric.HUMIDITY,
-                value = reading.measured.humidityPercent,
-                min = equipment.minHumidityPercent,
-                max = equipment.maxHumidityPercent,
-                k = equipment.humidityK
-            )?.let(::add)
-        }
+        evaluateMetric(
+            metric = Metric.PRESSURE,
+            value = reading.measured.pressureHpa,
+            min = equipment.minPressureHpa,
+            max = equipment.maxPressureHpa,
+            k = equipment.pressureK
+        )?.let { breaches.add(it) }
+
+        evaluateMetric(
+            metric = Metric.HUMIDITY,
+            value = reading.measured.humidityPercent,
+            min = equipment.minHumidityPercent,
+            max = equipment.maxHumidityPercent,
+            k = equipment.humidityK
+        )?.let { breaches.add(it) }
 
         val loss = breaches.sumOf { it.durabilityLoss }
         val next = (currentDurability - loss).coerceAtLeast(0.0)
@@ -193,34 +186,25 @@ class SurvivalManager(private val equipment: Equipment) {
 }
 
 /**
- * Android Studio の MVVM でそのまま利用できる ViewModel。
- * Fragment/Activity から pollAndUpdate() を呼ぶと StateFlow が更新される。
+ * AndroidX / kotlinx.coroutines に依存しない軽量コントローラ。
+ * state更新は listener コールバックでUIへ通知する。
  */
-class SurvivalViewModel(
+class SurvivalController(
     private val equipment: Equipment,
-    private val sensor: VirtualSensor
-) : ViewModel() {
-
+    private val sensor: VirtualSensor,
+    private val onStateChanged: (SurvivalUiState) -> Unit = {},
+    private val onCriticalFailure: (ThresholdBreach?) -> Unit = {}
+) {
     private val manager = SurvivalManager(equipment)
+    private var state = SurvivalUiState(durability = equipment.maxDurability)
 
-    private val _uiState = MutableStateFlow(
-        SurvivalUiState(durability = equipment.maxDurability)
-    )
-    val uiState: StateFlow<SurvivalUiState> = _uiState.asStateFlow()
+    fun getState(): SurvivalUiState = state
 
-    private val _criticalFailure = MutableSharedFlow<ThresholdBreach>(extraBufferCapacity = 1)
-    val criticalFailure: SharedFlow<ThresholdBreach> = _criticalFailure.asSharedFlow()
-
-    /**
-     * リアルタイムポーリングを模擬する更新メソッド。
-     */
     fun pollAndUpdate(rawEnvironment: EnvironmentData) {
         val reading = sensor.read(rawEnvironment)
-        val currentDurability = _uiState.value.durability
+        val result = manager.evaluate(reading, state.durability)
 
-        val result = manager.evaluate(reading, currentDurability)
-
-        _uiState.value = _uiState.value.copy(
+        state = state.copy(
             sensorReading = reading,
             durability = result.nextDurability,
             warning = result.warning,
@@ -229,22 +213,26 @@ class SurvivalViewModel(
             totalDurabilityLoss = result.totalLoss
         )
 
+        onStateChanged(state)
+
         if (result.event == SurvivalEvent.CRITICAL_FAILURE) {
-            result.breaches.firstOrNull { it.critical }?.let { _criticalFailure.tryEmit(it) }
+            onCriticalFailure(result.breaches.firstOrNull { it.critical })
         }
     }
 
     fun clearEvent() {
-        _uiState.value = _uiState.value.copy(event = SurvivalEvent.NONE)
+        state = state.copy(event = SurvivalEvent.NONE)
+        onStateChanged(state)
     }
 
     fun resetDurability() {
-        _uiState.value = _uiState.value.copy(
+        state = state.copy(
             durability = equipment.maxDurability,
             warning = false,
             event = SurvivalEvent.NONE,
             breaches = emptyList(),
             totalDurabilityLoss = 0.0
         )
+        onStateChanged(state)
     }
 }
