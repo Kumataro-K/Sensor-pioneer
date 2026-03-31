@@ -1,27 +1,26 @@
 package com.sensorpioneer.logic
 
-import kotlin.math.pow
-import kotlin.random.Random
+import androidx.lifecycle.ViewModel
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlin.math.pow
+import kotlin.random.Random
 
 /**
- * 惑星環境の真値モデル。
- * UIやセンサーのノイズが乗る前の「実際の環境」を表す。
+ * 惑星の環境データ（センサーの真値）。
  */
-data class EnvironmentModel(
+data class EnvironmentData(
     val temperatureCelsius: Double,
     val pressureHpa: Double,
     val humidityPercent: Double
 )
 
 /**
- * 装備の許容範囲と劣化係数。
- * k は D_loss = k * (V_env - V_tol)^2 に使用する物理係数。
+ * 装備の許容範囲と耐久計算係数。
  */
 data class Equipment(
     val name: String,
@@ -37,28 +36,6 @@ data class Equipment(
     val humidityK: Double = 0.0004
 )
 
-/**
- * センサー観測値。
- * trueEnvironment はノイズ付与前の真値を保持し、デバッグや検証時に利用できる。
- */
-data class SensorReading(
-    val measured: EnvironmentModel,
-    val trueEnvironment: EnvironmentModel
-)
-
-/**
- * 許容範囲逸脱の詳細。
- */
-data class ThresholdBreach(
-    val metric: Metric,
-    val measuredValue: Double,
-    val toleranceBoundary: Double,
-    val deltaFromBoundary: Double,
-    val degradationLoss: Double,
-    val warning: Boolean,
-    val critical: Boolean
-)
-
 enum class Metric {
     TEMPERATURE,
     PRESSURE,
@@ -70,21 +47,36 @@ enum class SurvivalEvent {
     CRITICAL_FAILURE
 }
 
-/**
- * UIへ公開する状態。
- */
-data class SurvivalUiState(
-    val sensorReading: SensorReading? = null,
-    val durability: Double = 100.0,
-    val totalDurabilityLoss: Double = 0.0,
-    val warning: Boolean = false,
-    val event: SurvivalEvent = SurvivalEvent.NONE,
-    val breaches: List<ThresholdBreach> = emptyList()
+data class ThresholdBreach(
+    val metric: Metric,
+    val measuredValue: Double,
+    val toleranceMin: Double,
+    val toleranceMax: Double,
+    val toleranceBoundary: Double,
+    val deltaFromBoundary: Double,
+    val durabilityLoss: Double,
+    val critical: Boolean
 )
 
 /**
- * 仮想センサー。
- * precision が 1.0 に近いほどノイズが小さく、0.0 に近いほどノイズが大きい。
+ * センサーの計測結果（ノイズ適用後）
+ */
+data class SensorReading(
+    val measured: EnvironmentData,
+    val raw: EnvironmentData
+)
+
+data class SurvivalUiState(
+    val sensorReading: SensorReading? = null,
+    val durability: Double = 100.0,
+    val warning: Boolean = false,
+    val event: SurvivalEvent = SurvivalEvent.NONE,
+    val breaches: List<ThresholdBreach> = emptyList(),
+    val totalDurabilityLoss: Double = 0.0
+)
+
+/**
+ * precision が 1.0 に近いほど高精度（ノイズ小）、0.0 に近いほど低精度（ノイズ大）。
  */
 class VirtualSensor(
     private val precision: Double,
@@ -94,184 +86,151 @@ class VirtualSensor(
         require(precision in 0.0..1.0) { "precision must be in 0.0..1.0" }
     }
 
-    fun sample(environment: EnvironmentModel): SensorReading {
-        val noiseScale = 1.0 - precision
-        val measured = EnvironmentModel(
-            temperatureCelsius = environment.temperatureCelsius + boundedNoise(temperatureBand() * noiseScale),
-            pressureHpa = environment.pressureHpa + boundedNoise(pressureBand() * noiseScale),
-            humidityPercent = (environment.humidityPercent + boundedNoise(humidityBand() * noiseScale))
-                .coerceIn(0.0, 100.0)
+    fun read(raw: EnvironmentData): SensorReading {
+        val scale = 1.0 - precision
+
+        val measured = EnvironmentData(
+            temperatureCelsius = raw.temperatureCelsius + noise(4.0 * scale),
+            pressureHpa = raw.pressureHpa + noise(30.0 * scale),
+            humidityPercent = (raw.humidityPercent + noise(8.0 * scale)).coerceIn(0.0, 100.0)
         )
 
-        return SensorReading(
-            measured = measured,
-            trueEnvironment = environment
-        )
+        return SensorReading(measured = measured, raw = raw)
     }
 
-    private fun boundedNoise(maxAbs: Double): Double {
+    private fun noise(maxAbs: Double): Double {
         if (maxAbs <= 0.0) return 0.0
-        return random.nextDouble(from = -maxAbs, until = maxAbs)
+        return random.nextDouble(-maxAbs, maxAbs)
     }
-
-    // 惑星探査向けに、温度・気圧・湿度それぞれ異なる観測揺らぎ帯を仮定する。
-    private fun temperatureBand(): Double = 4.0
-    private fun pressureBand(): Double = 30.0
-    private fun humidityBand(): Double = 8.0
 }
 
-/**
- * 装備耐久を計算する生存ロジック。
- */
-class SurvivalLogic(private val equipment: Equipment) {
+data class Evaluation(
+    val nextDurability: Double,
+    val totalLoss: Double,
+    val warning: Boolean,
+    val event: SurvivalEvent,
+    val breaches: List<ThresholdBreach>
+)
 
-    fun evaluate(
-        measuredEnvironment: EnvironmentModel,
-        currentDurability: Double
-    ): EvaluationResult {
+class SurvivalManager(private val equipment: Equipment) {
+
+    fun evaluate(reading: SensorReading, currentDurability: Double): Evaluation {
         val breaches = buildList {
             evaluateMetric(
                 metric = Metric.TEMPERATURE,
-                value = measuredEnvironment.temperatureCelsius,
-                minTolerance = equipment.minTemperatureCelsius,
-                maxTolerance = equipment.maxTemperatureCelsius,
+                value = reading.measured.temperatureCelsius,
+                min = equipment.minTemperatureCelsius,
+                max = equipment.maxTemperatureCelsius,
                 k = equipment.temperatureK
             )?.let(::add)
 
             evaluateMetric(
                 metric = Metric.PRESSURE,
-                value = measuredEnvironment.pressureHpa,
-                minTolerance = equipment.minPressureHpa,
-                maxTolerance = equipment.maxPressureHpa,
+                value = reading.measured.pressureHpa,
+                min = equipment.minPressureHpa,
+                max = equipment.maxPressureHpa,
                 k = equipment.pressureK
             )?.let(::add)
 
             evaluateMetric(
                 metric = Metric.HUMIDITY,
-                value = measuredEnvironment.humidityPercent,
-                minTolerance = equipment.minHumidityPercent,
-                maxTolerance = equipment.maxHumidityPercent,
+                value = reading.measured.humidityPercent,
+                min = equipment.minHumidityPercent,
+                max = equipment.maxHumidityPercent,
                 k = equipment.humidityK
             )?.let(::add)
         }
 
-        val loss = breaches.sumOf { it.degradationLoss }
-        val nextDurability = (currentDurability - loss).coerceAtLeast(0.0)
-        val warning = breaches.any { it.warning }
-        val criticalByTolerance = breaches.any { it.critical }
-        val criticalByDurability = nextDurability <= 0.0
+        val loss = breaches.sumOf { it.durabilityLoss }
+        val next = (currentDurability - loss).coerceAtLeast(0.0)
+        val hasCriticalBreach = breaches.any { it.critical }
+        val event = if (hasCriticalBreach || next <= 0.0) SurvivalEvent.CRITICAL_FAILURE else SurvivalEvent.NONE
 
-        return EvaluationResult(
-            nextDurability = nextDurability,
-            durabilityLoss = loss,
-            breaches = breaches,
-            warning = warning,
-            event = if (criticalByTolerance || criticalByDurability) {
-                SurvivalEvent.CRITICAL_FAILURE
-            } else {
-                SurvivalEvent.NONE
-            }
+        return Evaluation(
+            nextDurability = next,
+            totalLoss = loss,
+            warning = breaches.isNotEmpty(),
+            event = event,
+            breaches = breaches
         )
     }
 
     private fun evaluateMetric(
         metric: Metric,
         value: Double,
-        minTolerance: Double,
-        maxTolerance: Double,
+        min: Double,
+        max: Double,
         k: Double
     ): ThresholdBreach? {
-        val boundary = when {
-            value < minTolerance -> minTolerance
-            value > maxTolerance -> maxTolerance
-            else -> return null
-        }
+        if (value in min..max) return null
 
+        val boundary = if (value > max) max else min
         val delta = value - boundary
 
-        // 要件式:
+        // 物理モデル:
         // D_loss = k * (V_env - V_tol)^2
-        // 差分を2乗することで、逸脱が小さい間は緩やか、
-        // 大きく逸脱したときは急激にダメージが増える。
-        val durabilityLoss = k * delta.pow(2)
+        // 逸脱幅が大きいほど損失が二次的に増加する。
+        val loss = k * delta.pow(2)
 
-        // 「許容限界を50%以上超える」判定:
-        // 上限超えなら value >= max * 1.5
-        // 下限割れなら value <= min * 0.5（正の値を想定）
-        val critical = when {
-            value > maxTolerance -> value >= maxTolerance * 1.5
-            value < minTolerance -> value <= minTolerance * 0.5
-            else -> false
+        // 許容限界を50%以上超えたら致命的故障。
+        val critical = if (value > max) {
+            value >= max * 1.5
+        } else {
+            value <= min * 0.5
         }
 
         return ThresholdBreach(
             metric = metric,
             measuredValue = value,
+            toleranceMin = min,
+            toleranceMax = max,
             toleranceBoundary = boundary,
             deltaFromBoundary = delta,
-            degradationLoss = durabilityLoss,
-            warning = true,
+            durabilityLoss = loss,
             critical = critical
         )
     }
 }
 
-data class EvaluationResult(
-    val nextDurability: Double,
-    val durabilityLoss: Double,
-    val breaches: List<ThresholdBreach>,
-    val warning: Boolean,
-    val event: SurvivalEvent
-)
-
 /**
- * MVVM の ViewModel 相当クラス。
- * AndroidX ViewModel を直接継承しない純粋 Kotlin 実装にしており、
- * Android Studio プロジェクトへそのまま組み込んで利用しやすい形にしている。
+ * Android Studio の MVVM でそのまま利用できる ViewModel。
+ * Fragment/Activity から pollAndUpdate() を呼ぶと StateFlow が更新される。
  */
 class SurvivalViewModel(
-    equipment: Equipment,
+    private val equipment: Equipment,
     private val sensor: VirtualSensor
-) {
-    private val logic = SurvivalLogic(equipment)
-    private val maxDurability = equipment.maxDurability
+) : ViewModel() {
+
+    private val manager = SurvivalManager(equipment)
 
     private val _uiState = MutableStateFlow(
         SurvivalUiState(durability = equipment.maxDurability)
     )
     val uiState: StateFlow<SurvivalUiState> = _uiState.asStateFlow()
 
-    private val _criticalEvent = MutableSharedFlow<ThresholdBreach>(extraBufferCapacity = 1)
-    val criticalEvent: SharedFlow<ThresholdBreach> = _criticalEvent.asSharedFlow()
+    private val _criticalFailure = MutableSharedFlow<ThresholdBreach>(extraBufferCapacity = 1)
+    val criticalFailure: SharedFlow<ThresholdBreach> = _criticalFailure.asSharedFlow()
 
     /**
-     * リアルタイム更新用メソッド。
-     * センサー観測→生存計算→StateFlow反映を1ステップで実行する。
+     * リアルタイムポーリングを模擬する更新メソッド。
      */
-    fun pollAndUpdate(environment: EnvironmentModel) {
-        val reading = sensor.sample(environment)
-        val current = _uiState.value
+    fun pollAndUpdate(rawEnvironment: EnvironmentData) {
+        val reading = sensor.read(rawEnvironment)
+        val currentDurability = _uiState.value.durability
 
-        val result = logic.evaluate(
-            measuredEnvironment = reading.measured,
-            currentDurability = current.durability
-        )
+        val result = manager.evaluate(reading, currentDurability)
 
-        val nextState = current.copy(
+        _uiState.value = _uiState.value.copy(
             sensorReading = reading,
             durability = result.nextDurability,
-            totalDurabilityLoss = result.durabilityLoss,
             warning = result.warning,
             event = result.event,
-            breaches = result.breaches
+            breaches = result.breaches,
+            totalDurabilityLoss = result.totalLoss
         )
 
-        _uiState.value = nextState
-
         if (result.event == SurvivalEvent.CRITICAL_FAILURE) {
-            result.breaches.firstOrNull { it.critical }?.let {
-                _criticalEvent.tryEmit(it)
-            }
+            result.breaches.firstOrNull { it.critical }?.let { _criticalFailure.tryEmit(it) }
         }
     }
 
@@ -281,11 +240,11 @@ class SurvivalViewModel(
 
     fun resetDurability() {
         _uiState.value = _uiState.value.copy(
-            durability = maxDurability,
-            totalDurabilityLoss = 0.0,
+            durability = equipment.maxDurability,
             warning = false,
             event = SurvivalEvent.NONE,
-            breaches = emptyList()
+            breaches = emptyList(),
+            totalDurabilityLoss = 0.0
         )
     }
 }
