@@ -1,131 +1,51 @@
 package com.sensorpioneer
 
-import android.app.Activity
-import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
-import android.widget.Button
-import android.widget.LinearLayout
-import android.widget.TextView
 import com.sensorpioneer.logic.EnvironmentData
 import com.sensorpioneer.logic.Equipment
 import com.sensorpioneer.logic.SurvivalController
 import com.sensorpioneer.logic.SurvivalEvent
+import com.sensorpioneer.logic.SurvivalUiState
 import com.sensorpioneer.logic.VirtualSensor
 import kotlin.random.Random
 
 /**
- * Sensor Pioneer の最小実行可能サンプル Activity。
- * AndroidX ViewModel や kotlinx.coroutines を使わずに動作する実装。
+ * これは Android Activity ではなく、Kotlin/JVM で動作するコンソール版シミュレータ。
+ * Android SDK が未設定の環境でも実行できる。
  */
-class MainActivity : Activity() {
+class MainActivity {
+    private val controller = createController()
 
-    private val mainHandler = Handler(Looper.getMainLooper())
-    private var running = false
+    fun runSimulation(ticks: Int = 10) {
+        println("Sensor Pioneer console simulation start")
 
-    private lateinit var statusView: TextView
-    private lateinit var toggleButton: Button
-
-    private lateinit var controller: SurvivalController
-
-    private val pollRunnable = object : Runnable {
-        override fun run() {
-            if (!running) return
-
-            val sampledEnvironment = randomEnvironment()
-            controller.pollAndUpdate(sampledEnvironment)
-
-            // 1秒間隔でセンサー更新をシミュレート
-            mainHandler.postDelayed(this, 1000L)
+        repeat(ticks) {
+            controller.pollAndUpdate(randomEnvironment())
         }
+
+        println("Simulation finished")
     }
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-
-        controller = createController()
-
-        statusView = TextView(this).apply {
-            textSize = 16f
-            text = "Sensor Pioneer\nTap START to begin simulation"
-            setPadding(24, 24, 24, 24)
-        }
-
-        toggleButton = Button(this).apply {
-            text = "START"
-            setOnClickListener {
-                running = !running
-                text = if (running) "STOP" else "START"
-
-                if (running) {
-                    mainHandler.post(pollRunnable)
-                } else {
-                    mainHandler.removeCallbacks(pollRunnable)
-                }
-            }
-        }
-
-        val resetButton = Button(this).apply {
-            text = "RESET DURABILITY"
-            setOnClickListener { controller.resetDurability() }
-        }
-
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(24, 24, 24, 24)
-            addView(statusView)
-            addView(toggleButton)
-            addView(resetButton)
-        }
-
-        setContentView(root)
-        renderState(controller.getState())
-    }
-
-    override fun onStop() {
-        super.onStop()
-        running = false
-        toggleButton.text = "START"
-        mainHandler.removeCallbacks(pollRunnable)
-    }
-
-    private fun renderState(state: com.sensorpioneer.logic.SurvivalUiState) {
+    private fun renderState(state: SurvivalUiState) {
         val reading = state.sensorReading?.measured
-
         val envText = if (reading == null) {
             "No sensor data yet"
         } else {
-            "Temp: %.1f °C, Pressure: %.1f hPa, Humidity: %.1f %%".format(
+            "Temp=%.1f°C, Pressure=%.1fhPa, Humidity=%.1f%%".format(
                 reading.temperatureCelsius,
                 reading.pressureHpa,
                 reading.humidityPercent
             )
         }
 
-        val warningText = if (state.warning) "WARNING: OUT OF RANGE" else "Status: STABLE"
-        val eventText = if (state.event == SurvivalEvent.CRITICAL_FAILURE) "EVENT: CRITICAL_FAILURE" else "EVENT: NONE"
+        val warningText = if (state.warning) "WARNING" else "STABLE"
+        val eventText = if (state.event == SurvivalEvent.CRITICAL_FAILURE) "CRITICAL_FAILURE" else "NONE"
 
-        statusView.text = buildString {
-            appendLine("Sensor Pioneer")
-            appendLine(envText)
-            appendLine("Durability: %.2f".format(state.durability))
-            appendLine("Durability Loss(tick): %.4f".format(state.totalDurabilityLoss))
-            appendLine(warningText)
-            appendLine(eventText)
-            if (state.breaches.isNotEmpty()) {
-                appendLine("Breaches:")
-                state.breaches.forEach { breach ->
-                    appendLine(
-                        "- ${breach.metric}: value=%.2f, boundary=%.2f, loss=%.4f, critical=%s".format(
-                            breach.measuredValue,
-                            breach.toleranceBoundary,
-                            breach.durabilityLoss,
-                            breach.critical
-                        )
-                    )
-                }
-            }
-        }
+        println("$envText | Durability=%.2f | Loss=%.4f | %s | Event=%s".format(
+            state.durability,
+            state.totalDurabilityLoss,
+            warningText,
+            eventText
+        ))
     }
 
     private fun createController(): SurvivalController {
@@ -150,7 +70,7 @@ class MainActivity : Activity() {
             sensor = sensor,
             onStateChanged = { renderState(it) },
             onCriticalFailure = {
-                // 必要ならここでダイアログ表示・SE再生などを行う
+                println("Critical failure triggered: $it")
             }
         )
     }
@@ -162,4 +82,8 @@ class MainActivity : Activity() {
             humidityPercent = Random.nextDouble(0.0, 100.0)
         )
     }
+}
+
+fun main() {
+    MainActivity().runSimulation(ticks = 20)
 }
